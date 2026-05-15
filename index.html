@@ -3327,34 +3327,68 @@ function playUrl(url, opts = {}) {
   const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) ||
                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   if (isIOS) {
+    // Cleanup previous engines BEFORE doing anything on iOS
+    if (state.hls) { try { state.hls.destroy(); } catch (_) {} state.hls = null; }
+    if (state.mpegts) {
+      try { state.mpegts.unload(); state.mpegts.detachMediaElement(); state.mpegts.destroy(); } catch (_) {}
+      state.mpegts = null;
+    }
+    try { vid.removeAttribute('src'); vid.load(); } catch (_) {}
+
+    // Mixed-content check: HTTP stream on HTTPS page → blocked by iOS Safari silently
+    if (location.protocol === 'https:' && url.startsWith('http:')) {
+      showPlaybackError('Stream bloqueado: o servidor usa HTTP mas a página está em HTTPS. Contate seu provedor IPTV para ativar HTTPS nos streams.');
+      return;
+    }
+
     const typeIOS = detectStreamType(url);
-    if (typeIOS === 'hls') {
-      // Safari plays .m3u8 natively — go straight there
-      $('buffering-text').textContent = 'Engine: Safari HLS';
+
+    if (typeIOS === 'hls' || typeIOS === 'native') {
+      // Safari plays .m3u8 and mp4/mov natively
+      $('buffering-text').textContent = 'Engine: Safari Nativo';
+      state.currentEngine = 'native';
       showEngine('Safari HLS');
-      // Wire video-level error for native streams
       vid.onerror = () => {
         if (state.lastPlayUrl !== url) return;
+        const code = vid.error ? vid.error.code : '?';
+        const msg  = vid.error ? vid.error.message : 'desconhecido';
         const live2 = state.activeTab === 'live' || state.activeTab === 'favorites';
-        if (live2 && !tryNextLiveFormat('Erro nativo HLS')) return;
-        showPlaybackError('Não foi possível reproduzir. Tente outro item ou outro proxy.');
+        if (live2 && !tryNextLiveFormat('Erro nativo iOS')) return;
+        showPlaybackError(`Não foi possível reproduzir. [iOS err ${code}: ${msg}]`);
       };
-      fallbackToNative(url, vid);
+      vid.src = url;
+      const p = vid.play();
+      if (p) p.catch(err => {
+        if (err.name === 'NotAllowedError') showTapToPlay();
+        else {
+          const live2 = state.activeTab === 'live' || state.activeTab === 'favorites';
+          if (live2 && !tryNextLiveFormat('Autoplay bloqueado')) return;
+          showPlaybackError(`Não foi possível reproduzir. [play() ${err.name}: ${err.message}]`);
+        }
+      });
       return;
     }
-    if (typeIOS === 'mpegts' && isXtreamLike(url)) {
-      // iOS can't play raw .ts; try swapping to .m3u8 which Safari handles natively
-      const m3u8url = swapExt(url, 'm3u8');
-      $('buffering-text').textContent = 'Engine: Safari HLS (TS→M3U8)';
+
+    if (typeIOS === 'mpegts') {
+      // iOS can't play raw .ts — try swapping to .m3u8 (works on Xtream Codes servers)
+      const targetUrl = isXtreamLike(url) ? swapExt(url, 'm3u8') : url;
+      $('buffering-text').textContent = 'Engine: Safari HLS';
+      state.currentEngine = 'native';
       showEngine('Safari HLS');
       vid.onerror = () => {
-        if (state.lastPlayUrl !== url && state.lastPlayUrl !== m3u8url) return;
-        showPlaybackError('Não foi possível reproduzir. Tente outro item ou outro proxy.');
+        if (state.lastPlayUrl !== url && state.lastPlayUrl !== targetUrl) return;
+        const code = vid.error ? vid.error.code : '?';
+        const msg  = vid.error ? vid.error.message : 'desconhecido';
+        showPlaybackError(`Não foi possível reproduzir. [iOS err ${code}: ${msg}]`);
       };
-      fallbackToNative(m3u8url, vid);
+      vid.src = targetUrl;
+      const p = vid.play();
+      if (p) p.catch(err => {
+        if (err.name === 'NotAllowedError') showTapToPlay();
+        else showPlaybackError(`Não foi possível reproduzir. [play() ${err.name}: ${err.message}]`);
+      });
       return;
     }
-    // For native formats (mp4 etc.) on iOS, fall through to normal native path below
   }
 
   // Cleanup previous engines (but keep state.lastPlayMeta for fallback context)
